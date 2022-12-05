@@ -1,2 +1,2 @@
 user_controller_file_copy.py
-./__pycache__
+__pycache__/
