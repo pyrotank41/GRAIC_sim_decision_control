@@ -62,11 +62,11 @@ def plot(path, grid, start, goal, tvec, scale):
     goal = np.array(goal)/scale + tvec
     print(f"waypoint {goal}")
 
-    plt.scatter(grid_x_y[0], grid_x_y[1], s=5, color='k')
+    plt.scatter(grid_x_y[0], grid_x_y[1], s=5, color='k', alpha=.1)
     plt.plot(start[0], start[1], 'x')
     plt.plot(goal[0], goal[1], 'xr')
     pp = np.array(path)
-    plt.plot(pp[:, 0], pp[:, 1], 'g', alpha=0.5)
+    plt.plot(pp[:, 0], pp[:, 1], 'g', alpha=0.1)
     plt.xlabel('x')
     plt.ylabel('y')
     # if not plot_shown:
@@ -74,7 +74,7 @@ def plot(path, grid, start, goal, tvec, scale):
         # plot_shown = True
     
 
-def points_on_grid(points, scale): 
+def scaled_points_on_grid(points, scale): 
     return np.floor(points * scale).astype(int)
    
 
@@ -96,42 +96,43 @@ def get_transform_max(left_lane_location, right_lane_location, current_position,
 
 def plan(current_state, waypoint, left_lane, right_lane, obstacles):
     global plot_shown
-
     current_position = np.array(current_state[0])
     waypoint = np.array([waypoint.x, waypoint.y])
-    left_lane_location = np.array([[location.x, location.y] for location in left_lane.location])
-    right_lane_location = np.array([[location.x, location.y] for location in right_lane.location])
-    scale = 0.5
+    
+    scale = 1
+    padding = 2 # padding around the occupancy grid, in meters (unit of measurement value)
 
 
-    left_lane_t = left_lane_location - current_position
-    right_lane_t = right_lane_location - current_position 
+    # transform to make current position the origin
+    left_lane_t = left_lane - current_position
+    right_lane_t = right_lane - current_position 
     current_position_t = current_position - current_position
     waypoint_t  =  waypoint - current_position 
     
-    
-    # transform the grid so there are no negative values. import to have positive values for array pose array
+    # Getting the transform to shift all the values to positive values as grid index cannot have negative values
     min_transform = get_transform_min(left_lane_t, right_lane_t, current_position_t, waypoint_t)
+    
     left_lane_t = left_lane_t - min_transform
     right_lane_t = right_lane_t - min_transform
     current_position_t = current_position_t - min_transform
     waypoint_t = waypoint_t - min_transform
 
-    # tvec container all the transform without roation values untill now
+    # tvec container all the transform without roation values untill now, we will use this to regain our actual values
     tvec = min_transform + current_position
 
-    # since all the values are positive from previous transform, 
+    # scaling the grid to make it smaller or bigger depending the resolution we want, 
+    # lower the better for calculatioins, but too low will lead to no path solution
+    grid_left_lane_points  = scaled_points_on_grid(left_lane_t, scale)
+    grid_right_lane_points = scaled_points_on_grid(right_lane_t, scale)
+    grid_waypoint          = scaled_points_on_grid(waypoint_t, scale)
+    grid_current_position  = scaled_points_on_grid(current_position_t, scale)
+    
+
+    # Since all the values are positive due to previous transformations, 
     # we can use the max values to get the size of the grid.
     # This allows us to make dynamic grid size based on the obsticles, goal, and start positions
     max = get_transform_max(left_lane_t, right_lane_t, current_position_t, waypoint_t)
 
-    # scaling the grid to make it smaller or bigger depending the resolution we want, 
-    # lower the better for calculatioins, but to low will lead to no path solution
-    grid_left_lane_points  = points_on_grid(left_lane_t, scale)
-    grid_right_lane_points = points_on_grid(right_lane_t, scale)
-    grid_waypoint = points_on_grid(waypoint_t, scale)
-    grid_current_position = points_on_grid(current_position_t, scale)
-    
     # creating the grid and populating it with obsticles
     grid_shape = (np.ceil(np.array(max)*scale)).astype(int)
     grid = np.zeros(grid_shape)
@@ -140,9 +141,12 @@ def plan(current_state, waypoint, left_lane, right_lane, obstacles):
     grid[grid_waypoint[0], grid_waypoint[1]] = 6 # any value other than 1 is considered not an obsticle, this is purely for visualization
     grid[grid_current_position[0], grid_current_position[1]] = 2 # same as above
     
+    # print(grid)
+    # print(grid_waypoint)
+    # print(grid_current_position)
+    
+    grid  = add_padding(grid, padding*scale)
     print(grid)
-    print(grid_waypoint)
-    print(grid_current_position)
 
     path, cost = a_star(grid, heuristic, 
                             (grid_current_position[0], grid_current_position[1]) , 
@@ -160,6 +164,23 @@ def plan(current_state, waypoint, left_lane, right_lane, obstacles):
 
     else: 
         return None
+
+def add_padding(grid, padding):
+    """makes grids adjacent to the occupied grid to be occupied based on the padding value"""
+    occupanct_grids_xy = np.array(np.where(grid == 1)).astype(np.int16)
+    padding = np.floor(padding).astype(np.int16)
+    
+    step = [(1,0), (-1,0), (0,1), (0,-1), (1,1), (-1,1), (1,-1), (-1,-1)]
+    for i in range(occupanct_grids_xy.shape[1]):
+        for s in step:
+            try:
+                if grid[occupanct_grids_xy[0, i] + s[0], occupanct_grids_xy[1, i] + s[1]] == 0:
+                    grid[occupanct_grids_xy[0, i] + s[0], occupanct_grids_xy[1, i] + s[1]] = 1
+            except IndexError:
+                pass
+    
+    return grid
+
 
 class Action(Enum):
     """
@@ -290,7 +311,7 @@ class VehicleDecision():
 
         self.reachEnd = False
 
-    def get_ref_state(self, currState, obstacleList, lane_marker, waypoint):
+    def get_ref_state(self, currState, obstacleList, lane_marker, waypoint, boundary_lane_markers):
         """
             Get the reference state for the vehicle according to the current state and result from perception module
             Inputs:
@@ -300,20 +321,76 @@ class VehicleDecision():
         """
         self.lane_marker = lane_marker.lane_markers_center.location[-1]
         self.lane_state = lane_marker.lane_state
+
+        # left_lane_location = np.array([[location.x, location.y] for location in left_lane.location])
+        # right_lane_location = np.array([[location.x, location.y] for location in right_lane.location])
+
+        # print(obstacleList)
+        # [obstacle_name: "vehicle.bmw.isetta"
+        # obstacle_id: 92
+        # location: 
+        # x: 165.4092559814453
+        # y: -11.015679359436035
+        # z: -0.01039806380867958
+        # vertices_locations: 
+        # - 
+        #     vertex_location: 
+        #     x: 166.48597717285156
+        #     y: -10.19422435760498
+        #     z: -0.648704469203949
+        # - 
+        #     vertex_location: 
+        #     x: 166.44442749023438
+        #     y: -10.226252555847168
+        #     z: 0.7290442585945129
+        # - 
+        #     vertex_location: 
+        #     x: 166.57626342773438
+        #     y: -11.672050476074219
+        #     z: -0.6803363561630249
+        # - 
+        #     vertex_location: 
+        #     x: 166.5347137451172
+        #     y: -11.704078674316406
+        #     z: 0.697412371635437
+        # - 
+        #     vertex_location: 
+        #     x: 164.28379821777344
+        #     y: -10.327280044555664
+        #     z: -0.7182085514068604
+        # - 
+        #     vertex_location: 
+        #     x: 164.24224853515625
+        #     y: -10.359308242797852
+        #     z: 0.6595401763916016
+        # - 
+        #     vertex_location: 
+        #     x: 164.37408447265625
+        #     y: -11.805106163024902
+        #     z: -0.7498404383659363
+        # - 
+        #     vertex_location: 
+        #     x: 164.33253479003906
+        #     y: -11.83713436126709
+        #     z: 0.6279082894325256]
         
+           
         if self.reachEnd:
             print("reached the finish line")
             return None
+        if boundary_lane_markers.left_lane is not None and boundary_lane_markers.right_lane is not None:
+            resp = plan(currState, 
+                        waypoint.location,
+                        boundary_lane_markers.left_lane, 
+                        boundary_lane_markers.right_lane, 
+                        obstacleList)
 
-        resp = plan(currState, 
-                    waypoint.location,
-                    lane_marker.lane_markers_left, 
-                    lane_marker.lane_markers_right, 
-                    obstacleList)
-
-        if resp is not None:
-            self.target_x = resp[0]
-            self.target_y = resp[1]
+            if resp is not None:
+                self.target_x = resp[0]
+                self.target_y = resp[1]
+            else:
+                self.target_x = self.lane_marker.x
+                self.target_y = self.lane_marker.y
         
         else:
             self.target_x = self.lane_marker.x
@@ -377,6 +454,28 @@ class VehicleController():
         else:
             return self.stop()
 
+class LaneMarkers():
+    def __init__(self, role_name="ego_vehicle") -> None:
+        rospy.Subscriber("/carla/%s/left_lane_markers" % role_name, LaneList, self.left_lane_calback)
+        rospy.Subscriber("/carla/%s/right_lane_markers" % role_name, LaneList, self.right_lane_calback)
+
+        self.left_lane_markers = None
+        self.right_lane_markers = None 
+
+    def left_lane_calback(self, msg):
+        self.left_lane_markers = np.array([[location.x, location.y] for location in msg.location])
+    
+    def right_lane_calback(self, msg):
+        self.right_lane_markers = np.array([[location.x, location.y] for location in msg.location])
+    
+    @property
+    def right_lane(self):
+        return self.right_lane_markers
+    
+    @property
+    def left_lane(self):
+        return self.left_lane_markers
+
 
 class Controller(object):
     """docstring for Controller"""
@@ -384,14 +483,17 @@ class Controller(object):
         super(Controller, self).__init__()
         self.decisionModule = VehicleDecision()
         self.controlModule = VehicleController()
+        self.boundary_lane_markers = LaneMarkers()
+
 
     def stop(self):
         return self.controlModule.stop()
 
     def execute(self, currState, obstacleList, lane_marker, waypoint):
         # Get the target state from decision module
+        
         refState = self.decisionModule.get_ref_state(currState, obstacleList,
-                                                     lane_marker, waypoint)
+                                                     lane_marker, waypoint, self.boundary_lane_markers)
 
         if not refState:
             return None
