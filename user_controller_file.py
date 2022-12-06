@@ -14,11 +14,10 @@ from enum import Enum
 from queue import PriorityQueue
 import numpy as np
 from math import sqrt
+
 import matplotlib.pyplot as plt
 import math
 import threading
-
-
 
 def prune_path(path):
         def point(p):
@@ -45,77 +44,128 @@ def prune_path(path):
 
         return np.array(pruned_path)
 
-
 plot_shown = False
-def plot(path, grid, start, goal, tvec, scale):
+def plot(path, grid, start, goal, obstacle_occupancy, tvec, scale):
+    
     global plot_shown
+    plt.clf()
     path = np.array(path)/scale + tvec
     grid_x_y = np.array(np.where(grid == 1)).astype(np.int16)
-    print(grid_x_y)
     grid_x_y = grid_x_y/scale + tvec.reshape(2,1).astype(np.int16)
-    print(grid_x_y)
-    
-    print(f"start {start}")
     start = np.array(start)/scale + tvec
-    print(f"current {start}")
-    print(f"goal {goal}")
     goal = np.array(goal)/scale + tvec
-    print(f"waypoint {goal}")
+    
+    # if obstacle_occupancy is not None:
+    #     obstacle_occupancy_x_y = obstacle_occupancy/scale + tvec
+    #     for i in obstacle_occupancy_x_y:
+    #         plt.plot(i[0], i[1], 'o', color='red')
 
-    plt.scatter(grid_x_y[0], grid_x_y[1], s=5, color='k', alpha=.1)
+    plt.scatter(grid_x_y[0], grid_x_y[1], s=5, color='k', alpha=.5)
     plt.plot(start[0], start[1], 'x')
     plt.plot(goal[0], goal[1], 'xr')
     pp = np.array(path)
-    plt.plot(pp[:, 0], pp[:, 1], 'g', alpha=0.1)
+    plt.plot(pp[:, 0], pp[:, 1], 'g', alpha=0.5)
     plt.xlabel('x')
     plt.ylabel('y')
     # if not plot_shown:
     plt.show()
-        # plot_shown = True
-    
 
 def scaled_points_on_grid(points, scale): 
     return np.floor(points * scale).astype(int)
-   
 
-def get_transform_min(left_lane_location, right_lane_location, current_position, waypoint):
+def get_transform_min(left_lane_location, right_lane_location, current_position, waypoint, obstacle_centers, obstacle_radius):
     # min and max values for each parameter
-    min_x = min(left_lane_location[:, 0].min(), right_lane_location[:, 0].min(), current_position[0], waypoint[0])
-    min_y = min(left_lane_location[:, 1].min(), right_lane_location[:, 1].min(), current_position[1], waypoint[1])
+    if obstacle_centers is not None: 
+        obstacle_centers = obstacle_centers - obstacle_radius
+        min_x = min(left_lane_location[:, 0].min(), right_lane_location[:, 0].min(), current_position[0], waypoint[0], obstacle_centers[:, 0].min())
+        min_y = min(left_lane_location[:, 1].min(), right_lane_location[:, 1].min(), current_position[1], waypoint[1], obstacle_centers[:, 1].min())
+    else:
+        min_x = min(left_lane_location[:, 0].min(), right_lane_location[:, 0].min(), current_position[0], waypoint[0])
+        min_y = min(left_lane_location[:, 1].min(), right_lane_location[:, 1].min(), current_position[1], waypoint[1])
     return (min_x, min_y)
 
-def get_transform_max(left_lane_location, right_lane_location, current_position, waypoint):
+def get_transform_max(left_lane_location, right_lane_location, current_position, waypoint, obstacle_centers, obstacle_radius):
     # min and max values for each parameter
-    max_x = max(left_lane_location[:, 0].max(), right_lane_location[:, 0].max(), current_position[0], waypoint[0])
-    max_y = max(left_lane_location[:, 1].max(), right_lane_location[:, 1].max(), current_position[1], waypoint[1])
-    
+    if obstacle_centers is not None:
+        obstacle_centers = obstacle_centers + obstacle_radius
+        max_x = max(left_lane_location[:, 0].max(), right_lane_location[:, 0].max(), current_position[0], waypoint[0], obstacle_centers[:, 0].max())
+        max_y = max(left_lane_location[:, 1].max(), right_lane_location[:, 1].max(), current_position[1], waypoint[1], obstacle_centers[:, 1].max())
+    else:
+        max_x = max(left_lane_location[:, 0].max(), right_lane_location[:, 0].max(), current_position[0], waypoint[0])
+        max_y = max(left_lane_location[:, 1].max(), right_lane_location[:, 1].max(), current_position[1], waypoint[1])
     return (max_x, max_y)
 
+def create_occupancy_grid_via_corners(grid, corners):
+    # x = np.arange(corners[0][0]-padding, corners[2][0]+padding+1)
+    # y = np.arange(corners[0][1]-padding, corners[2][1]+padding+1)
+    # x, y = np.meshgrid(x, y)
+    occupancy = np.array([])
+    l = np.array([(0,1), (1,2), (2,3), (3,0)])
+    
+    for i in l:
+        pointa = corners[i[0]]
+        pointb = corners[i[1]]
+        x = pointb[0] - pointa[0]
+        y = pointb[1] - pointa[1]
+        
+        if x == 0 and y ==0:
+            print("Waring: points might not be in the correct order")
 
+        elif x == 0: # if poth of the points are in y axis
+            y = np.linspace(pointa[1], pointb[1], abs(y)+1)
+            x = np.zeros_like(y) + pointa[0]
+            occupancy = np.append(occupancy, np.array([x, y]).T)
+        
+        elif y == 0: # if both of the points are in x axis 
+            x = np.linspace(pointa[0], pointb[0], abs(x)+1)
+            y = np.zeros_like(x)
+            occupancy = np.append(occupancy, np.array([x, y]).T)
 
+        else: # if the points are not in the same axis
+            m = y/x
+            b = pointa[1] - m*pointa[0]
+            x = np.linspace(pointa[0], pointb[0], max(pointa[0], pointb[0]))
+            y = m*x + b
+            occupancy = np.append(occupancy, np.floor(np.array([x, y]).T))
 
-def plan(current_state, waypoint, left_lane, right_lane, obstacles):
+    occupancy = np.array(occupancy).reshape(-1,2).astype(int)
+    grid[occupancy[:,0], occupancy[:,1]] = 1
+    return grid
+
+def get_obstacle_ocupancy(radius):
+    x = np.arange(0, radius*2+1, 1)
+    y = np.arange(0, radius*2+1, 1)
+    X, Y = np.meshgrid(x, y)
+    distances = np.sqrt((X - radius)**2 + (Y - radius)**2)
+    binary_map = distances <= radius
+    binary_map = binary_map.astype(int)
+    occupancy_xy = np.array(np.where(binary_map == 1)).T
+    return occupancy_xy
+
+def plan(current_state, waypoint, left_lane, right_lane, obstacles_centers):
     global plot_shown
     current_position = np.array(current_state[0])
     waypoint = np.array([waypoint.x, waypoint.y])
     
     scale = 1
-    padding = 2 # padding around the occupancy grid, in meters (unit of measurement value)
-
+    padding = 3 # padding around the occupancy grid, in meters (unit of measurement value)
+    obstacle_radius = 2.5 # radius of the obstacle, in meters (unit of measurement value)
 
     # transform to make current position the origin
     left_lane_t = left_lane - current_position
     right_lane_t = right_lane - current_position 
     current_position_t = current_position - current_position
     waypoint_t  =  waypoint - current_position 
+    if obstacles_centers is not None: obstacles_centers = obstacles_centers -  current_position
     
     # Getting the transform to shift all the values to positive values as grid index cannot have negative values
-    min_transform = get_transform_min(left_lane_t, right_lane_t, current_position_t, waypoint_t)
+    min_transform = get_transform_min(left_lane_t, right_lane_t, current_position_t, waypoint_t, obstacles_centers, obstacle_radius)
     
     left_lane_t = left_lane_t - min_transform
     right_lane_t = right_lane_t - min_transform
     current_position_t = current_position_t - min_transform
     waypoint_t = waypoint_t - min_transform
+    if obstacles_centers is not None: obstacles_centers = obstacles_centers - min_transform
 
     # tvec container all the transform without roation values untill now, we will use this to regain our actual values
     tvec = min_transform + current_position
@@ -126,12 +176,14 @@ def plan(current_state, waypoint, left_lane, right_lane, obstacles):
     grid_right_lane_points = scaled_points_on_grid(right_lane_t, scale)
     grid_waypoint          = scaled_points_on_grid(waypoint_t, scale)
     grid_current_position  = scaled_points_on_grid(current_position_t, scale)
+    if obstacles_centers is not None:  grid_obstacles_centers = scaled_points_on_grid(obstacles_centers, scale)
     
 
     # Since all the values are positive due to previous transformations, 
     # we can use the max values to get the size of the grid.
     # This allows us to make dynamic grid size based on the obsticles, goal, and start positions
-    max = get_transform_max(left_lane_t, right_lane_t, current_position_t, waypoint_t)
+    
+    max = get_transform_max(left_lane_t, right_lane_t, current_position_t, waypoint_t, obstacles_centers, obstacle_radius)
 
     # creating the grid and populating it with obsticles
     grid_shape = (np.ceil(np.array(max)*scale)).astype(int)
@@ -140,13 +192,22 @@ def plan(current_state, waypoint, left_lane, right_lane, obstacles):
     grid[grid_right_lane_points[:, 0], grid_right_lane_points[:, 1]] = 1
     grid[grid_waypoint[0], grid_waypoint[1]] = 6 # any value other than 1 is considered not an obsticle, this is purely for visualization
     grid[grid_current_position[0], grid_current_position[1]] = 2 # same as above
-    
-    # print(grid)
-    # print(grid_waypoint)
-    # print(grid_current_position)
+
+    obstacle_occupancies = None
+    if obstacles_centers is not None: 
+
+        obstacle_occupancy = get_obstacle_ocupancy(obstacle_radius*scale)
+        obstacle_occupancies = np.array([obstacle_occupancy + obstacle_center for obstacle_center in grid_obstacles_centers])
+
+        for single_obsticle_occupancy in obstacle_occupancies:
+            for point in single_obsticle_occupancy:
+                if point[0] >= 0 and point[1] >= 0 and point[0] < grid_shape[0] and point[1] < grid_shape[1]:
+                    grid[point[0], point[1]] = 1
+
+      
     
     grid  = add_padding(grid, padding*scale)
-    print(grid)
+    # print(grid)
 
     path, cost = a_star(grid, heuristic, 
                             (grid_current_position[0], grid_current_position[1]) , 
@@ -157,8 +218,11 @@ def plan(current_state, waypoint, left_lane, right_lane, obstacles):
 
         #transforming path to the original coordinate system
         pruned_path_t = (pruned_path / scale) + min_transform + current_position
-        t = threading.Thread(target=plot, args=(pruned_path, grid, grid_current_position, grid_waypoint, tvec, scale))
-        t.start()
+        try:
+            t = threading.Thread(target=plot, args=(pruned_path, grid, grid_current_position, grid_waypoint, obstacle_occupancies,  tvec, scale))
+            t.start()
+        except Exception as e:
+            print(e)
         # t.join()
         return pruned_path_t[1]
 
@@ -180,7 +244,6 @@ def add_padding(grid, padding):
                 pass
     
     return grid
-
 
 class Action(Enum):
     """
@@ -306,8 +369,8 @@ class VehicleDecision():
         self.target_y = None
         self.change_lane = False
         self.change_lane_wp_idx = 0
-        self.detect_dist = 30
-        self.speed = 20
+        self.detect_dist = 20
+        self.speed = 30
 
         self.reachEnd = False
 
@@ -325,54 +388,13 @@ class VehicleDecision():
         # left_lane_location = np.array([[location.x, location.y] for location in left_lane.location])
         # right_lane_location = np.array([[location.x, location.y] for location in right_lane.location])
 
-        # print(obstacleList)
-        # [obstacle_name: "vehicle.bmw.isetta"
-        # obstacle_id: 92
-        # location: 
-        # x: 165.4092559814453
-        # y: -11.015679359436035
-        # z: -0.01039806380867958
-        # vertices_locations: 
-        # - 
-        #     vertex_location: 
-        #     x: 166.48597717285156
-        #     y: -10.19422435760498
-        #     z: -0.648704469203949
-        # - 
-        #     vertex_location: 
-        #     x: 166.44442749023438
-        #     y: -10.226252555847168
-        #     z: 0.7290442585945129
-        # - 
-        #     vertex_location: 
-        #     x: 166.57626342773438
-        #     y: -11.672050476074219
-        #     z: -0.6803363561630249
-        # - 
-        #     vertex_location: 
-        #     x: 166.5347137451172
-        #     y: -11.704078674316406
-        #     z: 0.697412371635437
-        # - 
-        #     vertex_location: 
-        #     x: 164.28379821777344
-        #     y: -10.327280044555664
-        #     z: -0.7182085514068604
-        # - 
-        #     vertex_location: 
-        #     x: 164.24224853515625
-        #     y: -10.359308242797852
-        #     z: 0.6595401763916016
-        # - 
-        #     vertex_location: 
-        #     x: 164.37408447265625
-        #     y: -11.805106163024902
-        #     z: -0.7498404383659363
-        # - 
-        #     vertex_location: 
-        #     x: 164.33253479003906
-        #     y: -11.83713436126709
-        #     z: 0.6279082894325256]
+        if len(obstacleList)>0:
+            obstacle_center = np.array([[obstacle.location.x, obstacle.location.y] for obstacle in obstacleList]).reshape(-1, 2)
+        else:
+            obstacle_center = None
+        # l = [0,2,4,6]
+        # obstacleList = np.array([[[[location.x, location.y]for location in vertex_location[l]] for vertex_location in  obstacle.vertices_locations] for obstacle in obstacleList])
+        # print(obstacleCenter)
         
            
         if self.reachEnd:
@@ -383,7 +405,7 @@ class VehicleDecision():
                         waypoint.location,
                         boundary_lane_markers.left_lane, 
                         boundary_lane_markers.right_lane, 
-                        obstacleList)
+                        obstacle_center)
 
             if resp is not None:
                 self.target_x = resp[0]
@@ -400,7 +422,6 @@ class VehicleDecision():
         
 
         return [self.target_x, self.target_y, self.speed]
-
 
 class VehicleController():
     def stop(self):
@@ -423,35 +444,67 @@ class VehicleController():
         curr_x = currentPose[0][0]
         curr_y = currentPose[0][1]
 
+
+        curr_theta = currentEuler[2]*180/np.pi
+        curr_theta = (curr_theta+360)%360
         target_x = targetPose[0]
         target_y = targetPose[1]
+
         target_v = targetPose[2]
+        target_theta =  np.arctan2(target_y-curr_y, target_x-curr_x)*180/np.pi
+        target_theta = (target_theta+360)%360
 
         k_s = 0.1
         k_ds = 1
-        k_n = 0.1
-        k_theta = 1
+        k_n = 0.038
+        k_theta = 0.25
+        decelerate_when_steering = 15
 
         # compute errors
         dx = target_x - curr_x
         dy = target_y - curr_y
-        xError = (target_x - curr_x) * np.cos(
-            currentEuler[2]) + (target_y - curr_y) * np.sin(currentEuler[2])
-        yError = -(target_x - curr_x) * np.sin(
-            currentEuler[2]) + (target_y - curr_y) * np.cos(currentEuler[2])
+
+        xError = (dx) * np.cos(
+            currentEuler[2]) + (dy) * np.sin(currentEuler[2])
+        yError = -(dx) * np.sin(
+            currentEuler[2]) + (dy) * np.cos(currentEuler[2])
+        
         curr_v = np.sqrt(currentPose[2][0]**2 + currentPose[2][1]**2)
+
+        thetaError = target_theta - curr_theta
+        print(curr_theta, target_theta, thetaError)
+
+        p = (k_n * yError)
+        d = (k_theta * thetaError)
+        delta = p + d
+
+
+        target_v = max(0,target_v - decelerate_when_steering*abs(delta))
+        print(delta, target_v)
+
         vError = target_v - curr_v
 
         delta = k_n * yError
         # Checking if the vehicle need to stop
-        if target_v > 0:
-            v = xError * k_s + vError * k_ds
+        if target_v >= 0:
+            
             #Send computed control input to vehicle
             newAckermannCmd = AckermannDrive()
+            v = xError * k_s + vError * k_ds
+        
+            '''if vError < 0:
+                print("vError:", vError)
+                # if curr_v>5:
+                #newAckermannCmd.acceleration = -30
+                # v = 5
+                print("=====Deccelerating======")'''
+
             newAckermannCmd.speed = v
-            newAckermannCmd.steering_angle = delta
+            newAckermannCmd.steering_angle = delta 
+            print("delta:", delta)
             return newAckermannCmd
         else:
+            print("************Execcuting Stop Condition************")
             return self.stop()
 
 class LaneMarkers():
@@ -475,7 +528,6 @@ class LaneMarkers():
     @property
     def left_lane(self):
         return self.left_lane_markers
-
 
 class Controller(object):
     """docstring for Controller"""
